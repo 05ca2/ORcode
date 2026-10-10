@@ -5,7 +5,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { OMNI_DIR, PLUGIN_DIR, CONFIG_PATH, RUNS_DIR, configExists, loadConfig, saveConfig, ensureDirs } from '../src/config.js';
+import { OMNI_DIR, PLUGIN_DIR, CONFIG_PATH, RUNS_DIR, SESSIONS_DIR, configExists, loadConfig, saveConfig, ensureDirs } from '../src/config.js';
 import { PRESETS, buildConfigFromPreset, listPresets } from '../src/presets.js';
 import { loadPlugins } from '../src/plugins/index.js';
 import { runPipeline } from '../src/orchestrator.js';
@@ -161,6 +161,9 @@ const VERSION = (() => { try { return JSON.parse(fs.readFileSync(new URL('../pac
 const COMMANDS = [
   ['/agents',  'Switch agent · 切换岗位'],
   ['/open',    'Open sub-session · 打开子会话详情（规划/执行/检验）'],
+  ['/save',    'Save session · 存档当前会话（/save <名称>）'],
+  ['/load',    'Load session · 读取存档（/load <文件> 或 /sessions 查看）'],
+  ['/sessions', 'List sessions · 列出已存档会话'],
   ['/models',  'Select model · 打开模型选择窗口（/models add 添加）'],
   ['/models add', 'Add models · 批量添加 OpenAI 兼容模型'],
   ['/mock',    'Toggle mock mode · 演示模式（无需密钥）'],
@@ -268,6 +271,7 @@ async function runInteractive(baseCfg, flags, plugins) {
   let agentIdx = 0;
   let busy = false;
   let line = '';
+  let caret = 0; // 输入框光标（代码点索引，0=行首，=line 长度=行尾）
   let tokens = 0;
   let interrupted = false;
   let streamBuf = ''; // 主会话流式缓冲（director 的输出）
@@ -318,6 +322,22 @@ async function runInteractive(baseCfg, flags, plugins) {
     if (key) { stageCurKey = key; curStageKey = key; stagesDone.add(key); }
   }
   function pushReply(t) { replies.push(t); }
+
+  // ---------- 输入框光标（caret）编辑 ----------
+  const cpArr = () => [...line];
+  function insertAtCaret(s) { const a = cpArr(); a.splice(caret, 0, ...[...s]); line = a.join(''); caret += [...s].length; }
+  function backspaceAtCaret() { if (caret <= 0) return; const a = cpArr(); a.splice(caret - 1, 1); line = a.join(''); caret--; }
+  function deleteAtCaret() { if (caret >= cpArr().length) return; const a = cpArr(); a.splice(caret, 1); line = a.join(''); }
+  function moveCaret(d) { caret = Math.max(0, Math.min(cpArr().length, caret + d)); }
+  // 鼠标点击列 → caret 代码点索引（输入文本从第 4 列开始：' ❯ ' 占 3 列）
+  function colToCaret(col) {
+    const arr = cpArr(); let w = 0, c = 0;
+    while (c < arr.length) {
+      if (col - 4 <= w) break;
+      w += charWidth(arr[c], arr[c + 1]?.codePointAt(0)); c++;
+    }
+    return c;
+  }
 
   // ---------- 子会话：规划/执行/检验各自独立窗口，主会话只留指挥的过程 ----------
   const STAGE_TITLES = { planner: '规划 · Planner', verifier: '检验 · Verifier' };
@@ -693,6 +713,8 @@ async function runInteractive(baseCfg, flags, plugins) {
         clickZones.push({ x1: 1, y1: popBase + i + 2, y2: popBase + i + 2, x2: MW, act: { t: 'cmd', cmd: c } });
       });
     }
+    // 输入框光标热区：点击输入行任意列 → 把光标定位到该列（鼠标控制光标）
+    clickZones.push({ x1: 1, y1: Math.max(1, main.length - 3), y2: Math.max(1, main.length - 3), x2: MW, act: { t: 'caret' } });
 
     // ---- 右栏：工作树（多模型协作流水线实时进度 + 子会话列表 + 设置入口）----
     right = workTreeLines(H, RW, MW);
@@ -829,8 +851,10 @@ async function runInteractive(baseCfg, flags, plugins) {
       rows.push(vlen(full) > W ? cutPlain(full, W) : full);
     }
     // 光标定位回输入行内（foot = [.., inBlank, inputRow, inBlank, agRow, hintRow]，输入行在倒数第 4 行）
-    const typedO = line ? cutPlain(line, Math.max(8, MW - 8)) : '';
-    out('\x1b[?25h\x1b[H\x1b[2J' + rows.join('\n') + '\n' + `\x1b[${Math.max(1, main.length - 3)};${4 + vlen(typedO)}H`);
+    // 光标列跟随 caret：输入文本从第 4 列开始（' ❯ ' 占 3 列）
+    const caretPrefix = [...line].slice(0, caret).join('');
+    const caretCol = Math.min(MW, 4 + vlen(caretPrefix));
+    out('\x1b[?25h\x1b[H\x1b[2J' + rows.join('\n') + '\n' + `\x1b[${Math.max(1, main.length - 3)};${caretCol}H`);
   }
 
   // ---------- 选择模型界面：搜索 + 按供应商分组，↵ 选择 ----------
@@ -968,8 +992,58 @@ async function runInteractive(baseCfg, flags, plugins) {
     return [...new Set(bad)];
   }
 
-  function execCommand(t) {
-    if (t === '/exit' || t === '/quit') exitTui();
+  // ---------- 会话存档：/save /load /sessions（存于 .omni/sessions）----------
+  function snapshot() {
+    return {
+      version: 1, savedAt: new Date().toISOString(), cwd: process.cwd(), versionTag: VERSION,
+      started, sessionStart: sessionStart.toISOString(),
+      transcript: [...transcript], replies: [...replies], chatHistory: [...chatHistory],
+      subs: [...subs.values()].map((s) => ({ key: s.key, idx: s.idx, title: s.title, sub: s.sub, lines: s.lines.map(String), status: s.status, stage: s.stage })),
+    };
+  }
+  function listSessions() {
+    ensureDirs();
+    let files = [];
+    try { files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json') && f !== 'autosave.json').sort(); } catch {}
+    if (!files.length) { push(grey('暂无存档 —— 用 /save <名称> 保存当前会话')); return; }
+    push(bold(`存档 ${files.length} 个（` + SESSIONS_DIR + '）：'));
+    for (const f of files) {
+      let meta = {};
+      try { meta = JSON.parse(fs.readFileSync(path.join(SESSIONS_DIR, f), 'utf8')); } catch {}
+      push('  ' + cyan(f.padEnd(30)) + grey((meta.savedAt || '').slice(0, 19).replace('T', ' ') + '  ' + (meta.transcript?.length || 0) + ' 行'));
+    }
+    push(grey('读取：/load <文件名>'));
+  }
+  function saveSession(name) {
+    ensureDirs();
+    const base = (name || ('session-' + new Date().toISOString().replace(/[:.]/g, '-'))).replace(/[^\w.-]/g, '_');
+    const file = base.endsWith('.json') ? base : base + '.json';
+    fs.writeFileSync(path.join(SESSIONS_DIR, file), JSON.stringify(snapshot(), null, 2));
+    push(green('✓ 已存档：') + cyan(file) + grey('（' + transcript.length + ' 行 · /load ' + file + ' 读取）'));
+  }
+  function loadSession(name) {
+    if (!name) { listSessions(); return; }
+    const base = name.endsWith('.json') ? name : name + '.json';
+    const p = path.join(SESSIONS_DIR, base);
+    if (!fs.existsSync(p)) { push(yellow('没有这个存档：' + base + '（/sessions 查看）')); return; }
+    let d; try { d = JSON.parse(fs.readFileSync(p, 'utf8')); } catch { push(red('存档损坏：' + base)); return; }
+    if (busyTick) { clearInterval(busyTick); busyTick = null; }
+    transcript.length = 0; (d.transcript || []).forEach((t) => transcript.push(t));
+    replies.length = 0; (d.replies || []).forEach((t) => replies.push(t));
+    chatHistory = [...(d.chatHistory || [])];
+    subs.clear();
+    for (const s of (d.subs || [])) subs.set(s.key, { key: s.key, idx: s.idx, title: s.title, sub: s.sub || '', lines: s.lines.map(String), sbuf: '', reasonBuf: '', status: s.status || 'run', stage: s.stage || '' });
+    started = !!d.started;
+    try { if (d.sessionStart) sessionStart = new Date(d.sessionStart); } catch {}
+    streamBuf = ''; think = null; busy = false; interrupted = false; view = null; viewOffset = 0; scrollOffset = 0; caret = 0; line = ''; popupOpen = false; pendingQueue.length = 0;
+    push(green('✓ 已读取存档：') + cyan(base) + grey('（' + transcript.length + ' 行）'));
+    render();
+  }
+  function autosave() {
+    try { ensureDirs(); fs.writeFileSync(path.join(SESSIONS_DIR, 'autosave.json'), JSON.stringify(snapshot(), null, 2)); } catch {}
+  }
+
+  function execCommand(t) {    if (t === '/exit' || t === '/quit') exitTui();
     else if (t === '/help') {
       push(bold('会话命令：'));
       COMMANDS.forEach(([c, d]) => push('  ' + cyan(c.padEnd(11)) + grey(d)));
@@ -1016,6 +1090,12 @@ async function runInteractive(baseCfg, flags, plugins) {
       const id = t.slice(7).trim();
       if (cfg.models?.[id]) { chatModel = id; push(green('本次会话统一模型：' + id)); }
       else push(yellow('无此模型：' + id + '（/status 查看可用模型）'));
+    } else if (t === '/sessions') {
+      listSessions();
+    } else if (t === '/save' || t.startsWith('/save ')) {
+      saveSession(t.slice(6).trim());
+    } else if (t === '/load' || t.startsWith('/load ')) {
+      loadSession(t.slice(6).trim()); return true;
     } else if (t.startsWith('/')) {
       push(yellow('未知命令：' + t) + grey('（输入 / 查看全部命令）'));
     } else return false;
@@ -1030,6 +1110,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     popupOpen = false;
     if (view) { view = null; viewOffset = 0; render(); return; }
     scrollOffset = 0; // 新输入 → 视图回到最新（避免停在历史位置看起来「会话消失」）
+    caret = 0; // 提交后清空输入光标
     if (clar) { handleClar(raw); return; } // 澄清问卷接管输入
     if (mw) { handleModelWizard(raw); render(); return; } // 添加模型向导接管输入
     if (!t) { render(); return; }
@@ -1039,6 +1120,7 @@ async function runInteractive(baseCfg, flags, plugins) {
       replies.length = 0;
     }
     push(grey('❯ ') + bold(t));
+    autosave(); // 每次提交静默写入 .omni/sessions/autosave.json，便于崩溃后恢复
     // 路由：/hoa-loop = 多模型协作流水线；普通输入 = 单个模型直接对话；其它 / 命令走 execCommand
     if (t.startsWith('/hoa-loop')) { runMultiModel(t.slice(9).trim()); return; }
     if (t.startsWith('/')) { execCommand(t); render(); return; }
@@ -1148,6 +1230,13 @@ async function runInteractive(baseCfg, flags, plugins) {
   function onKey(str, key) {
     if (!key) return;
     if (key.ctrl && key.name === 'c') { exitTui(); return; }
+    // 输入框光标移动：左右键 / Home / End（设置页里左右键另有用途，已排除）
+    if (!settings && !picker && !view) {
+      if (key.name === 'left') { moveCaret(-1); render(); return; }
+      if (key.name === 'right') { moveCaret(1); render(); return; }
+      if (key.name === 'home') { caret = 0; render(); return; }
+      if (key.name === 'end') { caret = cpArr().length; render(); return; }
+    }
     // 子会话详情页：esc/回车/q 返回主会话，↑↓ 滚动
     if (view) {
       if (key.name === 'escape' || key.name === 'return' || key.name === 'enter' || str === 'q') { view = null; viewOffset = 0; render(); return; }
@@ -1213,17 +1302,18 @@ async function runInteractive(baseCfg, flags, plugins) {
       }
       if (key.name === 'return' || key.name === 'enter') {
         if (clar) { submit(line); return; } // 回答澄清问题（逐题）
-        if (line.trim()) { pendingQueue.push(line.trim()); push(grey('✉ 已排队 ') + bold(line.trim())); line = ''; popupOpen = false; scrollOffset = 0; }
+        if (line.trim()) { pendingQueue.push(line.trim()); push(grey('✉ 已排队 ') + bold(line.trim())); line = ''; popupOpen = false; scrollOffset = 0; caret = 0; }
         render(); return;
       }
-      if (key.name === 'backspace' || key.name === 'delete') { line = [...line].slice(0, -1).join(''); render(); return; }
-      if (str && !key.ctrl && !key.meta) { const clean = str.replace(/[\r\n]/g, ''); if (clean) { line += clean; render(); } }
+      if (key.name === 'backspace') { backspaceAtCaret(); render(); return; }
+      if (key.name === 'delete') { deleteAtCaret(); render(); return; }
+      if (str && !key.ctrl && !key.meta) { const clean = str.replace(/[\r\n]/g, ''); if (clean) { insertAtCaret(clean); render(); } }
       return;
     }
     if (key.name === 'escape') {
       lastEscAt = 0;
       if (mw) { push(yellow('✕ 已取消添加模型')); mw = null; render(); return; }
-      if (popupOpen) { popupOpen = false; render(); } else if (line) { line = ''; render(); } return;
+      if (popupOpen) { popupOpen = false; render(); } else if (line) { line = ''; caret = 0; render(); } return;
     }
     if (key.name === 'up') {
       if (popupOpen) { const n = popupEntries()?.length || 1; popupSel = (popupSel - 1 + n) % n; render(); return; }
@@ -1236,7 +1326,7 @@ async function runInteractive(baseCfg, flags, plugins) {
       return;
     }
     if (key.name === 'tab') {
-      if (popupOpen) { const e = popupEntries(); if (e?.[popupSel]) { line = e[popupSel][0] + ' '; popupOpen = false; render(); } return; }
+      if (popupOpen) { const e = popupEntries(); if (e?.[popupSel]) { line = e[popupSel][0] + ' '; caret = cpArr().length; popupOpen = false; render(); } return; }
       agentIdx++; chatModel = null; const nr = currentRole(); if (nr) push(grey('岗位切换 → ') + cyan(nr)); render(); return;
     }
     if (key.name === 'return' || key.name === 'enter') {
@@ -1245,17 +1335,18 @@ async function runInteractive(baseCfg, flags, plugins) {
         const firstTok = line.trim().split(/\s+/)[0];
         const known = COMMANDS.some(([c]) => c === firstTok || c.split(' ')[0] === firstTok);
         if (known) { popupOpen = false; submit(line); return; }
-        const e = popupEntries(); if (e?.[popupSel]) { line = e[popupSel][0] + ' '; popupOpen = false; render(); return; }
+        const e = popupEntries(); if (e?.[popupSel]) { line = e[popupSel][0] + ' '; caret = cpArr().length; popupOpen = false; render(); return; }
       }
       submit(line);
       return;
     }
-    if (key.name === 'backspace' || key.name === 'delete') { line = [...line].slice(0, -1).join(''); popupOpen = popupEntries() != null; if (popupOpen) popupSel = 0; render(); return; }
+    if (key.name === 'backspace') { backspaceAtCaret(); popupOpen = popupEntries() != null; if (popupOpen) popupSel = 0; render(); return; }
+    if (key.name === 'delete') { deleteAtCaret(); popupOpen = popupEntries() != null; if (popupOpen) popupSel = 0; render(); return; }
     if (str && !key.ctrl && !key.meta) {
       const clean = str.replace(/[\r\n]/g, '');
       if (clean) {
         const wasCmd = line.startsWith('/');
-        line += clean;
+        insertAtCaret(clean);
         if (line.startsWith('/') && !line.includes(' ')) { if (!wasCmd) popupSel = 0; popupOpen = popupEntries() != null; }
         else popupOpen = false;
         render();
@@ -1354,7 +1445,10 @@ async function runInteractive(baseCfg, flags, plugins) {
       return;
     }
     for (const z of clickZones) {
-      if (row >= z.y1 && row <= z.y2 && col >= z.x1 && col <= z.x2) { handleZone(z); return; }
+      if (row >= z.y1 && row <= z.y2 && col >= z.x1 && col <= z.x2) {
+        if (z.act.t === 'caret') { caret = colToCaret(col); render(); return; }
+        handleZone(z); return;
+      }
     }
   }
   function handleZone(z) {
@@ -1408,11 +1502,15 @@ async function runInteractive(baseCfg, flags, plugins) {
     globalThis.__OMNI_TEST = {
       getState: () => ({
         busy, clar: !!clar, mw: !!mw, view, settings: !!settings,
-        popupOpen, popupSel,
+        popupOpen, popupSel, line, caret,
         transcript: transcript.map(String),
         subs: [...subs.values()].map((x) => ({ idx: x.idx, key: x.key, title: x.title, status: x.status, lines: x.lines.map(String) })),
         zones: clickZones.map((z) => ({ t: z.act && z.act.t, y1: z.y1, y2: z.y2, x1: z.x1, x2: z.x2, act: z.act })),
       }),
+      type: (s) => { const clean = s.replace(/[\r\n]/g, ''); if (clean) { insertAtCaret(clean); render(); } },
+      press: (name) => onKey('', { name }),
+      save: (n) => saveSession(n),
+      load: (n) => loadSession(n),
     };
   }
   while (true) await waitInput();

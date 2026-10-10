@@ -6,11 +6,13 @@ export const OMNI_DIR = path.join(process.cwd(), '.omni');
 export const CONFIG_PATH = path.join(OMNI_DIR, 'config.json');
 export const PLUGIN_DIR = path.join(OMNI_DIR, 'plugins');
 export const RUNS_DIR = path.join(OMNI_DIR, 'runs');
+export const SESSIONS_DIR = path.join(OMNI_DIR, 'sessions');
 
 export function ensureDirs() {
   fs.mkdirSync(OMNI_DIR, { recursive: true });
   fs.mkdirSync(PLUGIN_DIR, { recursive: true });
   fs.mkdirSync(RUNS_DIR, { recursive: true });
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 }
 
 export function loadConfig() {
