@@ -177,35 +177,60 @@ const COMMANDS = [
 
 const ANSI_RE = /\x1b\[[0-9;]*m/g;
 // CJK 感知字符宽度：中日韩全角字符在终端占 2 列
-function charWidth(c) {
+// next = 紧随其后的码点（用于变体选择符 FE0F 的 emoji 呈现判断）
+function charWidth(c, next) {
   const x = c.codePointAt(0);
   if (x < 0x1100) return 1;
+  // 零宽：组合附加符号、变体选择符、ZWJ/ZWNJ/ZWSP、BOM、附加符号扩展
+  if ((x >= 0x0300 && x <= 0x036F) || (x >= 0x20D0 && x <= 0x20FF) ||
+      (x >= 0xFE00 && x <= 0xFE0F) || x === 0xFEFF ||
+      (x >= 0x200B && x <= 0x200D)) return 0;
   if ((x >= 0x1100 && x <= 0x115F) || (x >= 0x2E80 && x <= 0xA4CF) || (x >= 0xAC00 && x <= 0xD7A3) ||
       (x >= 0xF900 && x <= 0xFAFF) || (x >= 0xFE30 && x <= 0xFE6F) || (x >= 0xFF00 && x <= 0xFF60) ||
       (x >= 0xFFE0 && x <= 0xFFE6) || (x >= 0x20000 && x <= 0x3FFFD)) return 2;
+  // Emoji（Emoji_Presentation）：终端里固定占 2 列。算成 1 列会导致整行比测量更宽 → 折行 → 整屏上滚、Logo 被顶出
+  if ((x >= 0x1F000 && x <= 0x1FAFF) || x === 0x1F004 || (x >= 0x231A && x <= 0x231B) ||
+      (x >= 0x23E9 && x <= 0x23FA) || (x >= 0x25FD && x <= 0x25FE) || (x >= 0x2614 && x <= 0x2615) ||
+      (x >= 0x2648 && x <= 0x2653) || x === 0x267F || x === 0x2693 || x === 0x26A1 ||
+      (x >= 0x26AA && x <= 0x26AB) || (x >= 0x26BD && x <= 0x26BE) || (x >= 0x26C4 && x <= 0x26C5) ||
+      x === 0x26CE || x === 0x26D4 || x === 0x26EA || (x >= 0x26F2 && x <= 0x26F3) || x === 0x26F5 ||
+      x === 0x26FA || x === 0x26FD || x === 0x2705 || (x >= 0x270A && x <= 0x270B) || x === 0x2728 ||
+      x === 0x274C || x === 0x274E || (x >= 0x2753 && x <= 0x2755) || x === 0x2757 ||
+      (x >= 0x2795 && x <= 0x2797) || x === 0x27B0 || x === 0x27BF ||
+      (x >= 0x2B1B && x <= 0x2B1C) || x === 0x2B50 || x === 0x2B55) return 2;
+  // 符号类字符（☀✂⌨ 等）本身按歧义宽度 1 列渲染，但跟变体选择符 FE0F（emoji 呈现）时占 2 列
+  if ((x >= 0x2600 && x <= 0x27BF) && next === 0xFE0F) return 2;
   return 1;
 }
-const vlen = (s) => { let n = 0; for (const ch of s.replace(ANSI_RE, '')) n += charWidth(ch); return n; };
+// 按显示宽度测量整串（正确处理 emoji/零宽/FE0F 组合）
+const vlen = (s) => {
+  const arr = [...s.replace(ANSI_RE, '')];
+  let n = 0;
+  for (let i = 0; i < arr.length; i++) n += charWidth(arr[i], arr[i + 1]?.codePointAt(0));
+  return n;
+};
 const vpad = (s, w) => { const n = vlen(s); return n > w ? cutPlain(s, w) : s + ' '.repeat(w - n); };
 function cutPlain(s, w) { // 按显示宽度截断（保留 ANSI 颜色码）
+  const arr = [...s];
   let out = '', n = 0, i = 0;
-  while (i < s.length && n < w) {
-    if (s[i] === '\x1b') { const m = /^\x1b\[[0-9;]*m/.exec(s.slice(i)); if (m) { out += m[0]; i += m[0].length; continue; } }
-    const ch = String.fromCodePoint(s.codePointAt(i));
-    const cw = charWidth(ch);
+  while (i < arr.length && n < w) {
+    if (arr[i] === '\x1b') { const rest = arr.slice(i).join(''); const m = /^\x1b\[[0-9;]*m/.exec(rest); if (m) { out += m[0]; i += [...m[0]].length; continue; } }
+    const ch = arr[i];
+    const cw = charWidth(ch, arr[i + 1]?.codePointAt(0));
     if (n + cw > w) break;
-    out += ch; n += cw; i += ch.length;
+    out += ch; n += cw; i += 1;
   }
   return out + '\x1b[0m';
 }
 const vwrap = (s, w) => { // 纯文本按显示宽度折叠成多行
   const lines = [];
   for (const raw of String(s).split('\n')) {
+    const arr = [...raw];
     let cur = '', n = 0;
-    for (const ch of raw) {
-      const cw = charWidth(ch);
+    for (let i = 0; i < arr.length; i++) {
+      const cw = charWidth(arr[i], arr[i + 1]?.codePointAt(0));
       if (n + cw > w) { lines.push(cur); cur = ''; n = 0; }
-      cur += ch; n += cw;
+      cur += arr[i]; n += cw;
     }
     lines.push(cur);
   }
@@ -595,6 +620,8 @@ async function runInteractive(baseCfg, flags, plugins) {
 
     const typedC = line ? cutPlain(line, Math.max(8, MW - 8)) : '';
     const padC = Math.max(0, MW - 4 - vlen(typedC) - (typedC ? 0 : INPUT_PH.length));
+    // 3 行高输入框：上下各一条空白背景条，视觉上加高对话输入区
+    const inBlank = barBg(' '.repeat(Math.max(0, MW - 1)));
     const inputRow = barBg(' ❯ ' + (typedC || fgDim(INPUT_PH)) + ' '.repeat(padC));
     const role = currentRole();
     const r = role ? cfg.roles[role] : null;
@@ -642,7 +669,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     }
     if (streamBuf) allLines.push(...vwrap('  ' + streamBuf.replace(/\n/g, ' ').slice(-400), MW));
 
-    const foot = [...busyRows, ...popRows, inputRow, agRow, hintRow];
+    const foot = [...busyRows, ...popRows, inBlank, inputRow, inBlank, agRow, hintRow];
     const headroom = Math.max(2, H - logoN - foot.length); // 正文可用行数
     scrollOffset = Math.max(0, Math.min(scrollOffset, Math.max(0, allLines.length - 1)));
     const end = allLines.length - scrollOffset;
@@ -652,7 +679,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     while (body.length < headroom) body.push('');
     body.length = headroom;
     main = [...logoRows, '']; // 标识永远固定在左上角，不随会话滚动
-    if (start > 0) main.push(grey(`…（↑ 还有 ${start} 行历史 · 滚轮/↑↓ 翻看）`));
+    if (start > 0) main.push(grey(`…（↑ 还有 ${start + 1} 行历史 · 滚轮/↑↓ 翻看）`)); // start 行在窗口之外 + 1 行被本提示行占位
     const tail = start > 0 ? headroom - 1 : headroom;
     const vis = body.slice(-tail);
     while (vis.length < tail) vis.push('');
@@ -661,7 +688,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     if (main.length > H) main.length = H; // 双保险：绝不超屏（防止整屏上滚顶掉标识）
     // 命令弹层点击热区：点击即直接执行该命令（主屏行号 = main 下标 + 1）
     if (popShow.length) {
-      const popBase = H - 3 - popRows.length; // popRows 第一行（空行）所在 1-based 行
+      const popBase = H - foot.length + busyRows.length; // popRows 第一行（空行）所在 1-based 行 - 1
       popShow.forEach(([c], i) => {
         clickZones.push({ x1: 1, y1: popBase + i + 2, y2: popBase + i + 2, x2: MW, act: { t: 'cmd', cmd: c } });
       });
@@ -797,11 +824,13 @@ async function runInteractive(baseCfg, flags, plugins) {
     for (let i = 0; i < H; i++) {
       const l = main[i] || '';
       const r = right[i] || '';
-      rows.push((l ? vpad(l, MW) : ' '.repeat(MW)) + cyan(' ┃ ') + (r ? vpad(r, RW) : ' '.repeat(RW)));
+      const full = (l ? vpad(l, MW) : ' '.repeat(MW)) + cyan(' ┃ ') + (r ? vpad(r, RW) : ' '.repeat(RW));
+      // 兜底钳制：任何一行都绝不超出屏幕宽度（超宽会折行 → 整屏上滚 → Logo 被顶出）
+      rows.push(vlen(full) > W ? cutPlain(full, W) : full);
     }
-    // 光标定位回输入行内（main 倒数第 3 行 = inputRow，「 ❯ 」后）
+    // 光标定位回输入行内（foot = [.., inBlank, inputRow, inBlank, agRow, hintRow]，输入行在倒数第 4 行）
     const typedO = line ? cutPlain(line, Math.max(8, MW - 8)) : '';
-    out('\x1b[?25h\x1b[H\x1b[2J' + rows.join('\n') + '\n' + `\x1b[${Math.max(1, main.length - 2)};${4 + vlen(typedO)}H`);
+    out('\x1b[?25h\x1b[H\x1b[2J' + rows.join('\n') + '\n' + `\x1b[${Math.max(1, main.length - 3)};${4 + vlen(typedO)}H`);
   }
 
   // ---------- 选择模型界面：搜索 + 按供应商分组，↵ 选择 ----------
@@ -1000,6 +1029,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     line = '';
     popupOpen = false;
     if (view) { view = null; viewOffset = 0; render(); return; }
+    scrollOffset = 0; // 新输入 → 视图回到最新（避免停在历史位置看起来「会话消失」）
     if (clar) { handleClar(raw); return; } // 澄清问卷接管输入
     if (mw) { handleModelWizard(raw); render(); return; } // 添加模型向导接管输入
     if (!t) { render(); return; }
@@ -1183,7 +1213,7 @@ async function runInteractive(baseCfg, flags, plugins) {
       }
       if (key.name === 'return' || key.name === 'enter') {
         if (clar) { submit(line); return; } // 回答澄清问题（逐题）
-        if (line.trim()) { pendingQueue.push(line.trim()); push(grey('✉ 已排队 ') + bold(line.trim())); line = ''; popupOpen = false; }
+        if (line.trim()) { pendingQueue.push(line.trim()); push(grey('✉ 已排队 ') + bold(line.trim())); line = ''; popupOpen = false; scrollOffset = 0; }
         render(); return;
       }
       if (key.name === 'backspace' || key.name === 'delete') { line = [...line].slice(0, -1).join(''); render(); return; }
@@ -1197,12 +1227,12 @@ async function runInteractive(baseCfg, flags, plugins) {
     }
     if (key.name === 'up') {
       if (popupOpen) { const n = popupEntries()?.length || 1; popupSel = (popupSel - 1 + n) % n; render(); return; }
-      if (started && !picker && !settings && !view) { scrollOffset += 3; render(); return; }
+      if (started && !picker && !settings && !view && !mw) { scrollOffset += 3; render(); return; }
       return;
     }
     if (key.name === 'down') {
       if (popupOpen) { const n = popupEntries()?.length || 1; popupSel = (popupSel + 1) % n; render(); return; }
-      if (started && !picker && !settings && !view) { scrollOffset = Math.max(0, scrollOffset - 3); render(); return; }
+      if (started && !picker && !settings && !view && !mw) { scrollOffset = Math.max(0, scrollOffset - 3); render(); return; }
       return;
     }
     if (key.name === 'tab') {
@@ -1317,7 +1347,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     }
     // 滚轮：主会话里翻看历史记录（64=上滚 65=下滚）
     if (btn === 64 || btn === 65) {
-      if (view || settings || picker) return;
+      if (view || settings || picker || mw) return; // 独立窗口/向导模式不翻主区
       scrollOffset += btn === 64 ? 4 : -4;
       scrollOffset = Math.max(0, scrollOffset);
       render();

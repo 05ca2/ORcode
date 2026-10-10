@@ -119,7 +119,9 @@ npm install -g .
                                                                           ┃
                                                                           ┃
                                                                           ┃
+                                                                          ┃
  ❯ Ask ORcode to do anything                                              ┃
+                                                                          ┃
 mock-model · D:\新建文件夹\openrelay · mock        ┃
                                        tab for agents · ? for shortcuts   ┃                          ⚙ 设置
 ```
