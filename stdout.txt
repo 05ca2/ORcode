@@ -1,0 +1,35 @@
+
+ORcode —— 多模型协作智能体开发工具
+用法：node bin/orcode.js <命令> [参数]
+
+命令：
+  init [--preset <name>]       在当前目录初始化 .omni/config.json（含预设岗位）
+  run "<任务>" [--mock] [--preset <name>]
+                               运行一次多模型编排流水线（指挥→规划→执行→检验）
+  chat [--mock] [--preset <name>]
+                               进入双栏终端界面（左对话流 + 右工作树）。
+                               默认：单个模型直接对话（无需 skill）。
+                               输入 /hor-loop <任务> 启动多模型协作流水线（规划/执行/检验各自在
+                               独立子会话运行，主会话只显示指挥的思考与下达命令；需先装 skill）。
+                               实时展示推理进度；模型工作时仍可输入（自动排队）；滚轮/↑↓ 翻看历史；
+                               连按两次 esc 中断；命令弹层可直接点击；右下角 ⚙ 设置可添加模型
+                               会话命令：/hor-loop /model /settings /open /agents /models /mock /plugins /reload /status /clear /help /exit
+  window                       在独立的终端窗口中打开 ORcode 界面
+  serve [--port 3000]          启动本地 Web 服务，浏览器打开 http://localhost:3000 使用
+  site [--port 8080]           启动官方官网（含插件中心 / 反馈），默认 http://localhost:8080
+  config                       查看当前配置（密钥脱敏）
+  roles                        列出已配置的岗位
+  models                       列出已配置的模型
+  plugin add <url>             从 URL 下载一个插件(.js)到 .omni/plugins
+  preset list                  列出可用预设
+  preset apply <name>          套用某预设的岗位与流水线（保留你的 models）
+  help                         显示本帮助
+
+提示：直接运行  orcode  会在独立窗口打开交互界面；orcode chat 在当前终端内打开。
+会话内 /models 查看模型（供应商/显示名），/models add 可批量添加 OpenAI 兼容模型。
+
+示例：
+  node bin/orcode.js init
+  node bin/orcode.js run "用 Python 写一个贪吃蛇游戏并跑通" --mock
+  node bin/orcode.js run "调研 RAG 的主流方案" --preset research
+
