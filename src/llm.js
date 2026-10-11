@@ -175,9 +175,28 @@ function mockChat(model, messages, tools, opts) {
         { role: 'researcher', instruction: `调研：${last.slice(0, 80)}`, depends_on: [] },
         { role: 'coder', instruction: `实现：${last.slice(0, 80)}`, depends_on: ['researcher'] },
       ],
+      waves: [[0, 1]],
     });
+  } else if (kind === 'dispatch') {
+    content = JSON.stringify({ waves: [[0, 1]], notes: '（mock）Director 已签收计划，并分派 1 个波次（2 个并行岗位）' });
   } else if (kind === 'verifier') {
-    content = JSON.stringify({ passed: true, score: 88, gaps: [], verdict: '（mock）经核查，任务已完成' });
+    // 从 messages[1].content（用户 input）解析 ATTEMPT 和 ROUND 标记
+    const prompt = messages[1]?.content || last;
+    const mAttempt = prompt.match(/ATTEMPT:(\d+)/);
+    const mRound = prompt.match(/ROUND:(\d+)/);
+    const attempt = mAttempt ? Number(mAttempt[1]) : 1;
+    const round = mRound ? Number(mRound[1]) : 0;
+    const forcePass = last.includes('[pass1]');
+    // 逻辑：有 [pass1] 哨兵时第 1 轮即全部通过；否则：
+    //   - attempt 1 所有 round 失败
+    //   - attempt >= 2 所有 round 通过（一次性完成本轮全部核查）
+    const passed = forcePass || (attempt >= 2);
+    content = JSON.stringify({
+      passed,
+      score: passed ? 90 : 42,
+      gaps: passed ? [] : ['mock 缺口：缺少针对边界情况的处理与自测'],
+      verdict: passed ? '（mock）重规划后核查通过' : '（mock）首次核查未通过',
+    });
   } else {
     content = `（mock 模型 ${model.model}）已处理该步骤：\n${last.slice(0, 220)}\n[工具调用与执行过程已略]`;
   }

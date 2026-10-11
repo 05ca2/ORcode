@@ -53,7 +53,7 @@ export const PRESETS = {
       coder: role('coder', '研发 Coder', 'main', SYS_CODER, ['file', 'shell'], 0.4),
       verifier: role('verifier', '检验 Verifier', 'main', SYS_VERIFIER, ['file', 'shell'], 0.2),
     },
-    pipeline: { stages: ['director', 'planner', 'workers', 'verifier'], max_workers: 1, verify_rounds: 2 },
+    pipeline: { stages: ['director', 'planner', 'workers', 'verifier'], max_workers: 3, verify_rounds: 3 },
   },
 
   coding: {
@@ -66,7 +66,7 @@ export const PRESETS = {
       coder: role('coder', '研发 Coder', 'main', SYS_CODER, ['file', 'shell'], 0.4),
       verifier: role('verifier', '检验 Verifier', 'main', SYS_VERIFIER, ['file', 'shell'], 0.2),
     },
-    pipeline: { stages: ['planner', 'workers', 'verifier'], max_workers: 1, verify_rounds: 2 },
+    pipeline: { stages: ['planner', 'workers', 'verifier'], max_workers: 3, verify_rounds: 3 },
   },
 
   research: {
@@ -79,7 +79,7 @@ export const PRESETS = {
       researcher: role('researcher', '调研 Researcher', 'main', SYS_RESEARCHER, ['web', 'file'], 0.5),
       verifier: role('verifier', '检验 Verifier', 'main', SYS_VERIFIER, ['file'], 0.2),
     },
-    pipeline: { stages: ['director', 'workers', 'verifier'], max_workers: 1, verify_rounds: 1 },
+    pipeline: { stages: ['director', 'workers', 'verifier'], max_workers: 3, verify_rounds: 3 },
   },
 };
 

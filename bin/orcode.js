@@ -313,12 +313,20 @@ async function runInteractive(baseCfg, flags, plugins) {
 
   function push(t) { transcript.push(t); }
   const replies = []; // 保留：最终结果同步写入（兼容导出）
-  // 工作树状态：跟踪流水线阶段（director → planner → workers → verifier）
+  // 工作树状态：跟踪流水线阶段（director → planner → dispatch → workers → verifier → final）
   let stageCurKey = null;
   const stagesDone = new Set();
+  // 新管线状态：Director 分派 / 波次 / 核实进度 / 重规划 / 动态岗位
+  let curWave = 0, totalWaves = 0, waveWorkers = 0;
+  let verifyStreak = 0, verifyTarget = 0, replanning = false, attemptNo = 1, finalReady = false;
+  const workerRolesUsed = new Set();
   function markStage(n) {
     const s = String(n);
-    const key = s.includes('指挥') ? 'director' : s.includes('规划') ? 'planner' : s.includes('执行') ? 'workers' : (s.includes('检') || s.includes('验')) ? 'verifier' : null;
+    const key = s.includes('分派') || s.includes('签收') ? 'dispatch'
+      : s.includes('指挥') ? 'director'
+      : s.includes('规划') ? 'planner'
+      : s.includes('执行') ? 'workers'
+      : (s.includes('检') || s.includes('验')) ? 'verifier' : null;
     if (key) { stageCurKey = key; curStageKey = key; stagesDone.add(key); }
   }
   function pushReply(t) { replies.push(t); }
@@ -340,7 +348,7 @@ async function runInteractive(baseCfg, flags, plugins) {
   }
 
   // ---------- 子会话：规划/执行/检验各自独立窗口，主会话只留指挥的过程 ----------
-  const STAGE_TITLES = { planner: '规划 · Planner', verifier: '检验 · Verifier' };
+  const STAGE_TITLES = { planner: '规划 · Planner', verifier: '检验 · Verifier', dispatch: '分派 · Director' };
   function ensureSub(key, title, sub, stage) {
     if (!subs.has(key)) {
       subs.set(key, { key, idx: subs.size + 1, title, sub: sub || '', lines: [], sbuf: '', reasonBuf: '', status: 'run', stage: stage || curStageKey || '' });
@@ -369,9 +377,9 @@ async function runInteractive(baseCfg, flags, plugins) {
     if (target) { flushSub(target); target.lines.push(l); } else { flushStreamMain(); push(l); }
     think = null;
   }
-  // 事件路由：director → 主会话；planner/verifier → 各自子会话；workers → 按岗位子会话
+  // 事件路由：director / dispatch → 主会话；planner/verifier → 各自子会话；workers → 按岗位子会话
   function routeOf(roleId) {
-    if (curStageKey === 'director') return 'main';
+    if (curStageKey === 'director' || curStageKey === 'dispatch') return 'main';
     if (curStageKey === 'planner') return subs.has('planner') ? 'planner' : 'main';
     if (curStageKey === 'verifier') return subs.has('verifier') ? 'verifier' : 'main';
     if (curStageKey === 'workers') {
@@ -394,6 +402,8 @@ async function runInteractive(baseCfg, flags, plugins) {
       flushAll(); endThink();
       const prev = curStageKey;
       markStage(n);
+      // 进入 Verifier 时解析核查目标轮数（子串形如 "第 x/y 次核查"）
+      if (curStageKey === 'verifier') { const m = String(s || '').match(/(\d+)\/(\d+)\s*次核查/); if (m) verifyTarget = Number(m[2]); }
       // 上一阶段的子会话标记完成
       for (const x of subs.values()) if (x.status === 'run' && x.stage && x.stage !== curStageKey) x.status = 'done';
       if (!curStageKey || curStageKey === 'director') {
@@ -401,7 +411,7 @@ async function runInteractive(baseCfg, flags, plugins) {
         push('\n' + bold(cyan('◆ ' + n)) + (s ? grey('  ' + s) : '') + '\n');
       } else {
         let sub2 = null;
-        if (curStageKey !== 'workers') sub2 = ensureSub(curStageKey, STAGE_TITLES[curStageKey] || n, s || '', curStageKey);
+        if (curStageKey !== 'workers' && curStageKey !== 'dispatch') sub2 = ensureSub(curStageKey, STAGE_TITLES[curStageKey] || n, s || '', curStageKey);
         curRoute = curStageKey === 'workers' ? 'main' : curStageKey;
         push('\n' + bold(cyan('◆ ' + n)) + (s ? grey('  ' + s) : '') + (sub2 ? grey(`  → 子会话 [${sub2.idx}]`) : ''));
       }
@@ -415,6 +425,7 @@ async function runInteractive(baseCfg, flags, plugins) {
       const s = s0.length > 60 ? s0.slice(0, 60) + '…' : s0;
       if (curStageKey === 'workers') {
         const key = 'w:' + role;
+        workerRolesUsed.add(role);
         const sub = ensureSub(key, '执行 · ' + role, s, 'workers');
         curRoute = key;
         push(grey('  ⇒ 命令 [') + bold(role) + grey('] ') + bold(s)); // 主会话：指挥下达的命令
@@ -473,6 +484,38 @@ async function runInteractive(baseCfg, flags, plugins) {
       scheduleRender();
     },
     done: () => { flushAll(); for (const x of subs.values()) if (x.status === 'run') x.status = 'done'; },
+    // ---------- 新管线事件 ----------
+    dispatch: (n, s) => {
+      if (interrupted) throw new Error('__INTERRUPT__');
+      flushAll(); endThink();
+      markStage(n);
+      for (const x of subs.values()) if (x.status === 'run' && x.stage && x.stage !== 'dispatch') x.status = 'done';
+      curRoute = 'main';
+      push('\n' + bold(cyan('◆ ' + n)) + (s ? grey('  ' + s) : '') + '\n');
+      curActivity = String(n);
+      scheduleRender();
+    },
+    wave: (idx, total, count) => {
+      if (interrupted) throw new Error('__INTERRUPT__');
+      flushAll(); endThink();
+      curWave = idx; totalWaves = total; waveWorkers = count;
+      push(grey(`  ▷ 波次 ${idx}/${total} · 并行 ${count} 个 Worker 启动`));
+      curActivity = `波次 ${idx}/${total}`;
+      scheduleRender();
+    },
+    verify: (round, passed, score) => {
+      if (interrupted) throw new Error('__INTERRUPT__');
+      flushAll(); endThink();
+      if (passed) verifyStreak = round; else verifyStreak = 0;
+      scheduleRender();
+    },
+    replan: (attempt, gaps) => {
+      flushAll(); endThink();
+      replanning = true; attemptNo = attempt; verifyStreak = 0; curWave = 0; totalWaves = 0; workerRolesUsed.clear();
+      push('\n' + yellow('↺ 核查未通过 → 回传 Planner 重新规划') + grey(`（第 ${attempt} 次重规划，缺口 ${gaps.length} 项）`));
+      scheduleRender();
+    },
+    final: () => { flushAll(); finalReady = true; replanning = false; scheduleRender(); },
     // 澄清问卷：指挥发现关键不确定点时，逐题询问用户
     clarify: (questions) => runClarify(questions),
   });
@@ -551,39 +594,86 @@ async function runInteractive(baseCfg, flags, plugins) {
     return L.slice(0, H);
   }
 
-  // 右栏：工作树 —— 流水线进度 + 子会话列表（可点击打开详情页）+ 右下角设置入口
+  // 右栏：工作树 —— 有向流 Director→Planner→↩回传→Director分派→Workers→Verifier→Final
+  //      + 动态并行岗位明细 + 核实进度 + 回传指示 + 子会话列表 + 右下角设置入口
   function workTreeLines(H, RW, MW) {
     const w = Math.max(12, RW - 1);
     const cut = (s) => cutPlain(s, w);
-    const names = { director: '指挥 Director', planner: '规划 Planner', workers: '执行 Workers', verifier: '检验 Verifier' };
-    const desc = { director: '拆解任务、分派岗位', planner: '制定顺序执行计划', workers: '多岗位并发协作执行', verifier: '核查结果并驱动修复' };
-    const stageKeys = cfg.pipeline?.stages || ['director', 'planner', 'workers', 'verifier'];
-    const curIdx = stageCurKey ? stageKeys.indexOf(stageCurKey) : -1;
+    const maxWorkers = Math.max(1, cfg.pipeline?.max_workers || 1);
+    const verifyRounds = Math.max(1, cfg.pipeline?.verify_rounds || 2);
+
+    const stateOf = (key) => {
+      if (key === 'final') return finalReady ? 'done' : (busy && stageCurKey === 'verifier' ? 'active' : 'pending');
+      const active = busy && stageCurKey === key;
+      const done = stagesDone.has(key) && !active;
+      return active ? 'active' : done ? 'done' : 'pending';
+    };
+    const stIcon = (st) => st === 'active' ? { icon: '●', col: yellow }
+      : st === 'done' ? { icon: '✓', col: green }
+      : st === 'fail' ? { icon: '✗', col: red }
+      : { icon: '○', col: grey };
+
+    const NODES = [
+      { key: 'director', name: 'Director 拆解', desc: '拆解·分派岗位', model: cfg.roles?.director?.model },
+      { key: 'planner', name: 'Planner 规划', desc: '分工+waves', model: cfg.roles?.planner?.model },
+      { key: 'dispatch', name: 'Director 分派', desc: '签收·下发', model: cfg.roles?.director?.model },
+      { key: 'workers', name: 'Workers 执行', desc: `额定${maxWorkers}并发`, model: null },
+      { key: 'verifier', name: 'Verifier 核查', desc: `连${verifyTarget || verifyRounds}遍`, model: cfg.roles?.verifier?.model },
+      { key: 'final', name: '✅ 最终输出', desc: '核实后交付', model: null },
+    ];
+    const arrowAfter = (key) => {
+      if (key === 'director') return grey('   ▼');
+      if (key === 'planner') return grey('   ↩ 回传计划给 Director');
+      if (key === 'dispatch') return grey('   ▼');
+      if (key === 'workers') return grey('   ▼');
+      if (key === 'verifier') return replanning ? yellow('   ↺ 回传 Planner 重规划') : grey('   ▼');
+      return '';
+    };
+
     const L = [];
     L.push(cut(bold('▾ 工作树 · 多模型协作')));
     L.push('');
-    stageKeys.forEach((k, i) => {
-      const role = cfg.roles?.[k];
-      const mid = role?.model;
-      const mm = mid ? cfg.models?.[mid] : null;
-      const modelId = mm ? mm.model : mid || '—';
-      let icon, col;
-      if (busy && i === curIdx) { icon = '●'; col = yellow; }
-      else if (stagesDone.has(k) && (i < curIdx || !busy)) { icon = '✓'; col = green; }
-      else { icon = '○'; col = grey; }
-      const branch = i === 0 ? '    ' : i === stageKeys.length - 1 ? '└─▶ ' : '├─▶ ';
-      L.push(cut(grey('  ' + branch)) + col(icon + ' ' + names[k]) + grey('  ' + modelId));
-      L.push(cut(grey(i === stageKeys.length - 1 ? '        ' : '  │     ') + col(desc[k])));
+    NODES.forEach((n, i) => {
+      const st = stateOf(n.key);
+      const { icon, col } = stIcon(st);
+      const tail = n.key === 'workers'
+        ? (workerRolesUsed.size ? grey(' ×' + workerRolesUsed.size) : grey(' ×' + Math.max(waveWorkers, 1)))
+        : (n.model ? grey(' ' + n.model) : '');
+      L.push(cut(col(icon + ' ') + bold(n.name) + tail + grey('  ' + n.desc)));
+      if (i < NODES.length - 1) L.push(cut(arrowAfter(n.key)));
     });
+
+    // 动态并行岗位明细（Workers 节点下，按实际用到的角色）
+    if (workerRolesUsed.size) {
+      L.push('');
+      L.push(cut(grey('  并行岗位：')));
+      for (const r of workerRolesUsed) {
+        if (L.length >= H - 3) break;
+        const nm = cfg.roles?.[r]?.name || r;
+        const done = !busy || stageCurKey !== 'workers';
+        L.push(cut(grey('   ') + (done ? green('✓ ') : yellow('● ')) + cyan(r) + grey(' ' + nm)));
+      }
+    }
+
+    // 核实进度（连续 N 遍）
+    if (verifyTarget) {
+      L.push('');
+      const dots = [];
+      for (let k = 0; k < verifyTarget; k++) dots.push(k < verifyStreak ? green('✓') : grey('·'));
+      L.push(cut(grey('  核查进度 ') + dots.join('')));
+    }
+
+    // 状态行
     L.push('');
     const nRoles = Object.keys(cfg.roles || {}).length;
     const nModels = new Set(Object.values(cfg.roles || {}).map((r) => r.model)).size;
-    if (busy) L.push(cut(yellow('  ● 进行中 · ') + grey('阶段 ' + Math.max(1, curIdx + 1) + '/' + stageKeys.length)));
-    else if (stageCurKey) L.push(cut(green('  ✓ 流程完成') + grey(' · ' + nModels + ' 个模型协作')));
+    if (busy) L.push(cut(yellow('  ● 进行中') + grey(' · 第' + attemptNo + '轮 · 波次 ' + (curWave || 0) + '/' + (totalWaves || 0))));
+    else if (finalReady) L.push(cut(green('  ✓ 流程完成') + grey(' · ' + nModels + ' 模型协作')));
     else L.push(cut(grey('  待命 · 输入任务后按此流程协作')));
-    L.push(cut(grey('  ' + nRoles + ' 个岗位 · ' + nModels + ' 个模型 · ' + tokens + ' tokens')));
+    L.push(cut(grey('  ' + nRoles + ' 岗位 · ' + nModels + ' 模型 · ' + tokens + ' tokens')));
+
     // 子会话列表：点击或 /open <n> 打开独立详情页
-    if (subs.size) {
+    if (subs.size && L.length < H - 3) {
       L.push('');
       L.push(cut(bold('▾ 子会话') + grey('（点击查看）')));
       for (const s of subs.values()) {
@@ -594,6 +684,7 @@ async function runInteractive(baseCfg, flags, plugins) {
         L.push(cut(grey(`  [${s.idx}] `) + icon + ' ' + cyan(s.title) + grey(` · ${s.lines.length} 行`)));
       }
     }
+
     while (L.length < H) L.push('');
     // 右下角设置入口：点击打开设置页（首项即「＋ 添加模型」）
     const setLabel = '⚙ 设置';
@@ -897,8 +988,8 @@ async function runInteractive(baseCfg, flags, plugins) {
   function settingsItems() {
     const items = [{ t: 'addModel', label: '＋ 添加模型（OpenAI 兼容向导）' }];
     for (const [rid, rr] of Object.entries(cfg.roles || {})) items.push({ t: 'role', role: rid, model: rr.model });
-    items.push({ t: 'num', key: 'max_workers', label: 'hoa-loop 并发数（workers 同时执行）', min: 1, max: 8 });
-    items.push({ t: 'num', key: 'verify_rounds', label: 'hoa-loop 核查轮数（verifier 修复回路）', min: 1, max: 5 });
+    items.push({ t: 'num', key: 'max_workers', label: '额定并行数（每波最大并发 Worker，封顶用）', min: 1, max: 8 });
+    items.push({ t: 'num', key: 'verify_rounds', label: '核实通过轮数（Verifier 需连续通过才输出）', min: 1, max: 5 });
     items.push({ t: 'info', label: '提示：/hoa-loop <任务> 才会启动多模型协作；普通输入=单模型直接对话' });
     return items;
   }
@@ -1191,6 +1282,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     let runCfg = cfg;
     if (chatModel) { runCfg = structuredClone(cfg); for (const rr of Object.values(runCfg.roles)) rr.model = chatModel; }
     busy = true; interrupted = false; lastEscAt = 0; tokens = 0; stageCurKey = null; curStageKey = null; stagesDone.clear();
+    curWave = 0; totalWaves = 0; waveWorkers = 0; verifyStreak = 0; verifyTarget = 0; replanning = false; attemptNo = 1; finalReady = false; workerRolesUsed.clear();
     taskStart = Date.now(); curActivity = ''; mainReasonBuf = ''; curRoute = 'main';
     chatHistory = []; // 进入多模型协作，清空单模型对话历史
     subs.clear(); view = null; viewOffset = 0; // 新任务：重建子会话
@@ -1198,6 +1290,7 @@ async function runInteractive(baseCfg, flags, plugins) {
     busyTick = setInterval(() => { if (busy) render(); }, 200);
     render();
     (async () => {
+      let finW = 60;
       try {
         const report = await runPipeline(task, runCfg, plugins, { cwd: process.cwd() }, mock, tuiTrace());
         ensureDirs();
@@ -1207,7 +1300,7 @@ async function runInteractive(baseCfg, flags, plugins) {
         push('\n' + dim('运行报告已保存：' + rp));
         // 最终输出：品红色块单独呈现（区别于过程信息，保持简洁）
         push('\n' + bold(magenta('━━ 最终输出 ━━')));
-        const finW = Math.max(20, Math.floor((process.stdout.columns || 100) * 0.68) - 4);
+        finW = Math.max(20, Math.floor((process.stdout.columns || 100) * 0.68) - 4);
         vwrap(finalAnswerText(report), finW).slice(0, 14).forEach((l) => push('  ' + magenta(l)));
         push('');
       } catch (e) {
@@ -1502,12 +1595,13 @@ async function runInteractive(baseCfg, flags, plugins) {
     globalThis.__OMNI_TEST = {
       getState: () => ({
         busy, clar: !!clar, mw: !!mw, view, settings: !!settings,
-        popupOpen, popupSel, line, caret,
+        popupOpen, popupSel, line, caret, finalReady, verifyStreak, verifyTarget, attemptNo,
         transcript: transcript.map(String),
         subs: [...subs.values()].map((x) => ({ idx: x.idx, key: x.key, title: x.title, status: x.status, lines: x.lines.map(String) })),
         zones: clickZones.map((z) => ({ t: z.act && z.act.t, y1: z.y1, y2: z.y2, x1: z.x1, x2: z.x2, act: z.act })),
       }),
       type: (s) => { const clean = s.replace(/[\r\n]/g, ''); if (clean) { insertAtCaret(clean); render(); } },
+      submit: (raw) => { if (!started) { started = true; transcript.length = 0; replies.length = 0; } submit(raw); },
       press: (name) => onKey('', { name }),
       save: (n) => saveSession(n),
       load: (n) => loadSession(n),
