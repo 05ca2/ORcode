@@ -1,16 +1,34 @@
 {
   "name": "orcode",
-  "version": "0.1.0",
-  "description": "ORcode 多模型协作智能体开发工具：自带模型接入、可下载插件、多岗位编排（指挥->规划->执行->检验）",
+  "version": "0.2.0",
+  "description": "ORcode 多模型协作智能体开发工具：自带模型接入、可下载插件、多岗位编排（指挥->规划->执行->检验）+ 跨平台 TTY 支持",
   "type": "module",
   "bin": {
-    "orcode": "bin/orcode.js",
-    "or": "bin/orcode.js"
+    "orcode": "bin/orcode",
+    "or": "bin/orcode"
   },
   "engines": {
     "node": ">=18"
   },
   "scripts": {
     "start": "node bin/orcode.js"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/05ca2/ORcode.git"
+  },
+  "keywords": [
+    "orcode",
+    "multi-agent",
+    "workflow",
+    "llm",
+    "ai",
+    "terminal",
+    "tui"
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/05ca2/ORcode/issues"
+  },
+  "homepage": "https://github.com/05ca2/ORcode#readme"
 }
