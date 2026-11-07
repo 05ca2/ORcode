@@ -1,3 +1,21 @@
+# ⚠️ 此仓库已废弃 / DEPRECATED — 请前往新仓库
+
+> **本项目已迁移到 [`05ca2/ORcode-new`](https://github.com/05ca2/ORcode-new)**，所有新版本（当前 **v0.2.17**）都在那里发布。
+>
+> 本仓库停在 **v0.2.0（2026-10-11）**，**不再维护**。从这里 clone / 下载得到的会是旧版。
+>
+> | 你要做的事 | 正确地址 |
+> |------------|----------|
+> | 克隆 | `git clone https://github.com/05ca2/ORcode-new.git` |
+> | 下载 ZIP | https://github.com/05ca2/ORcode-new/releases/latest |
+> | 查看源码 | https://github.com/05ca2/ORcode-new |
+>
+> 下载后运行 `orcode --version` 应显示 `orcode 0.2.17`；若显示 `0.2.0` 说明拿错了。
+>
+> ---
+>
+> 以下是 **v0.2.0 时期的历史文档**，仅作存档保留。
+
 <p align="center">
   <img src="assets/wordmark.svg" alt="ORCODE" width="420" height="75" />
 </p>
